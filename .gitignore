@@ -4,6 +4,7 @@
 !.vscode/launch.json
 *.code-workspace
 .history
+.idea
 ### Go ###
 # Binaries for programs and plugins
 *.exe
@@ -14,6 +15,9 @@
 
 # Test binary, built with `go test -c`
 *.test
+
+# Local dev binaries (e.g. feature builds for manual testing)
+/bin/
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out

@@ -1,20 +1,19 @@
 package build
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"github.com/plentico/plenti/common"
 	"rogchap.com/v8go"
 )
 
 var (
 	// Regex match static import statements.
 	reStaticImport = regexp.MustCompile(`import\s((.*)\sfrom(.*);|(((.*)\n){0,})\}\sfrom(.*);)`)
-
 	// Regex match static export statements.
 	reStaticExport = regexp.MustCompile(`export\s(.*);`)
 	// Replace import references with variable signatures.
@@ -24,6 +23,8 @@ var (
 	reConst = regexp.MustCompile(`(?m)^const\s`)
 	// Only use comp signatures inside JS template literal placeholders.
 	reTemplatePlaceholder = regexp.MustCompile(`(?s)\$\{validate_component\(.*\)\}`)
+	// Match: var Component = create_ssr_component(
+	reSSRComp = regexp.MustCompile(`(var\s)Component(\s=\screate_ssr_component\()`)
 	// Only add named imports to create_ssr_component().
 	reCreateFunc = regexp.MustCompile(`(create_ssr_component\(\(.*\)\s=>\s\{)`)
 	// Match: allLayouts.layouts_components_grid_svelte
@@ -36,117 +37,74 @@ var (
 	reCSSCli = regexp.MustCompile(`var(\s)css(\s)=(\s)\{(.*\n){0,}\};`)
 )
 
+type OutputCode struct {
+	JS  string
+	CSS string
+}
+
 func compileSvelte(ctx *v8go.Context, SSRctx *v8go.Context, layoutPath string,
 	componentStr string, destFile string, stylePath string) error {
 
 	// Create any sub directories need for filepath.
 	if err := os.MkdirAll(filepath.Dir(destFile), os.ModePerm); err != nil {
-		return fmt.Errorf("can't make path: %s %w%s\n", layoutPath, err, common.Caller())
+		return fmt.Errorf("can't make path: %s %w\n", layoutPath, err)
 	}
 
-	var layoutFD *common.FData
-
-	// will break router if no layout check and can't use HasPrefix as themes breaks that
-	if common.UseMemFS {
-		layoutFD = common.GetOrSet(layoutPath, "")
-		if strings.Contains(layoutPath, "layouts/") {
-			// if hash is the same skip. common.Get(layoutPath).Hash will be 0 initially
-			if layoutFD.Hash > 0 && layoutFD.Hash == common.CRC32Hasher([]byte(componentStr)) {
-				// Add the orig css as we clear the bundle each build.
-				//  May be a better way to avoid also but cheap enough vs compiling anyway.
-				val := common.Get(stylePath)
-				// layoutFD.CSS is the specific component css already compiled
-				// .B may seem counterintuitive for style but we use .B for all in server.
-				val.B = append(val.B, layoutFD.CSS...)
-				// need this or complains about missing layout_xxxxx. Some way around?
-				_, err := SSRctx.RunScript(string(layoutFD.SSR), "create_ssr")
-				if err != nil {
-					return fmt.Errorf("Could not add SSR Component: %w%s\n", err, common.Caller())
-				}
-				/// we don't go further so set js etc.. as processed
-				// important for not doing work for no reason and stops regex import logc breaking as paths will have already be changed...
-				common.Get(destFile).Processed = true
-
-				return nil
-			}
-
-		}
-		// add or update hash to other also, not just layouts
-		layoutFD.Hash = common.CRC32Hasher([]byte(componentStr))
-
-	}
-
-	// Escape backticks so svelte doesn't try to compile a partial component string
-	componentStr = strings.ReplaceAll(componentStr, "`", "\\`")
 	// Compile component with Svelte.
-	_, err := ctx.RunScript("var { js, css } = svelte.compile(`"+componentStr+"`, {css: false, hydratable: true});", "compile_svelte")
+	scriptDOM := fmt.Sprintf(`;__svelte__.compile({ path: %q, code: %q, target: "dom", css: false, name: "Component" })`, layoutPath, componentStr)
+	resultDOM, err := ctx.RunScript(scriptDOM, "compile_svelte")
 	if err != nil {
-		return fmt.Errorf("can't compile component file %s with Svelte: %w%s\n", layoutPath, err, common.Caller())
+		return fmt.Errorf("\nDOM: Can't compile component file %s\n%w", layoutPath, err)
 	}
 	// Get the JS code from the compiled result.
-	jsCode, err := ctx.RunScript("js.code;", "compile_svelte")
-	if err != nil {
-		return fmt.Errorf("V8go could not execute js.code for %s: %w%s\n", layoutPath, err, common.Caller())
+	outDOM := new(OutputCode)
+	if err := json.Unmarshal([]byte(resultDOM.String()), outDOM); err != nil {
+		return fmt.Errorf("Could not unmarshal DOM output: %w\n", err)
 	}
-	jsBytes := []byte(jsCode.String())
-	if common.UseMemFS {
-		common.Set(destFile, layoutPath, &common.FData{Hash: common.CRC32Hasher(jsBytes), B: jsBytes})
-
-	} else {
-		err = os.WriteFile(destFile, jsBytes, 0755)
-		if err != nil {
-			return fmt.Errorf("Unable to write compiled client file: %w%s\n", err, common.Caller())
-		}
+	jsCode := outDOM.JS
+	jsBytes := []byte(jsCode)
+	err = os.WriteFile(destFile, jsBytes, 0755)
+	if err != nil {
+		return fmt.Errorf("Unable to write compiled client file: %w\n", err)
 	}
 
 	// Get the CSS code from the compiled result.
-	cssCode, err := ctx.RunScript("css.code;", "compile_svelte")
-	if err != nil {
-		return fmt.Errorf("V8go could not execute css.code  for %s: %w%s\n", layoutPath, err, common.Caller())
-	}
-	cssStr := strings.TrimSpace(cssCode.String())
+	cssCode := outDOM.CSS
+	cssStr := strings.TrimSpace(cssCode)
 	// If there is CSS, write it into the bundle.css file.
 	if cssStr != "null" {
-		if common.UseMemFS {
-			// ok to append as created on build
-			val := common.Get(stylePath)
-
-			val.B = append(val.B, []byte(cssCode.String())...) // will reuse just layout/component css when no change
-			// could use pointers but this is ok
-			layoutFD.CSS = []byte(cssCode.String())
-
-		} else {
-			cssFile, err := os.OpenFile(stylePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if err != nil {
-				return fmt.Errorf("Could not open bundle.css for writing: %w%s\n", err, common.Caller())
-			}
-			defer cssFile.Close()
-			if _, err := cssFile.WriteString(cssStr); err != nil {
-				return fmt.Errorf("could not write to cssStr: %w%s\n", err, common.Caller())
-			}
+		cssFile, err := os.OpenFile(stylePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("Could not open bundle.css for writing: %w\n", err)
+		}
+		defer cssFile.Close()
+		if _, err := cssFile.WriteString(cssStr); err != nil {
+			return fmt.Errorf("could not write to cssStr: %w\n", err)
 		}
 	}
 
 	// Get Server Side Rendered (SSR) JS.
-	_, ssrCompileErr := ctx.RunScript("var { js: ssrJs, css: ssrCss } = svelte.compile(`"+componentStr+"`, {generate: 'ssr'});", "compile_svelte")
-	if ssrCompileErr != nil {
-		return fmt.Errorf("V8go could not compile ssrJs.code for %s: %w%s\n", layoutPath, ssrCompileErr, common.Caller())
-	}
-	ssrJsCode, err := ctx.RunScript("ssrJs.code;", "compile_svelte")
+	scriptSSR := fmt.Sprintf(`;__svelte__.compile({ path: %q, code: %q, target: "ssr", css: false, name: "Component" })`, layoutPath, componentStr)
+	resultSSR, err := ctx.RunScript(scriptSSR, "compile_svelte")
 	if err != nil {
-		return fmt.Errorf("V8go could not get ssrJs.code value for %s: %w%s\n", layoutPath, err, common.Caller())
+		return fmt.Errorf("\nSSR: Can't compile component file %s\n%w", layoutPath, err)
 	}
+	outSSR := new(OutputCode)
+	if err := json.Unmarshal([]byte(resultSSR.String()), outSSR); err != nil {
+		return fmt.Errorf("Could not unmarshal SSR output: %w\n", err)
+	}
+	ssrJsCode := outSSR.JS
 
 	// Remove static import statements.
-	ssrStr := reStaticImport.ReplaceAllString(ssrJsCode.String(), `/*$0*/`)
+	ssrStr := reStaticImport.ReplaceAllString(ssrJsCode, `/*$0*/`)
 	// Remove static export statements.
 	ssrStr = reStaticExport.ReplaceAllString(ssrStr, `/*$0*/`)
 
 	ssrStr = reConst.ReplaceAllString(ssrStr, "var ")
 	// Create custom variable name for component based on the file path for the layout.
 	componentSignature := strings.ReplaceAll(strings.ReplaceAll(layoutPath, "/", "_"), ".", "_")
-	// Use signature instead of generic "Component". Add space to avoid also replacing part of "loadComponent".
-	ssrStr = strings.ReplaceAll(ssrStr, " Component ", " "+componentSignature+" ")
+	// Use signature instead of specific component name (e.g. var Html = create_ssr_component(($$result, $$props, $$bindings, slots) => {)
+	ssrStr = reSSRComp.ReplaceAllString(ssrStr, "${1}"+componentSignature+"${2}")
 
 	namedExports := reStaticExport.FindAllStringSubmatch(ssrStr, -1)
 	// Loop through all export statements.
@@ -231,8 +189,7 @@ func compileSvelte(ctx *v8go.Context, SSRctx *v8go.Context, layoutPath string,
 			// Remove whitespace on sides that might occur when splitting into array by comma.
 			currentNamedImport = strings.TrimSpace(currentNamedImport)
 			// Check that there is a valid named import.
-			if currentNamedImport != "" && importSignature != "" {
-
+			if currentNamedImport != "" && importSignature != "" && strings.HasSuffix(importSignature, "_svelte") {
 				// Entry should be block scoped, like: let count = layouts_scripts_stores_svelte_count;
 				blockScopedVar := "\n let " + currentNamedImport + " = " + importSignature + "_" + currentNamedImport + ";"
 				// Add block scoped var inside create_ssr_component.
@@ -272,12 +229,8 @@ func compileSvelte(ctx *v8go.Context, SSRctx *v8go.Context, layoutPath string,
 	// Add component to context so it can be used to render HTML in data_source.go.
 	_, err = SSRctx.RunScript(ssrStr, "create_ssr")
 	if err != nil {
-		return fmt.Errorf("Could not add SSR Component for %s: %w%s\n", layoutPath, err, common.Caller())
+		return fmt.Errorf("Could not add SSR Component for %s: %w\n", layoutPath, err)
 	}
 
-	if common.UseMemFS {
-		// again store for no change
-		layoutFD.SSR = []byte(ssrStr)
-	}
 	return nil
 }

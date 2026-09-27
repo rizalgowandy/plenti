@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/plentico/plenti/common"
+	"github.com/plentico/plenti/defaults"
 	"github.com/plentico/plenti/readers"
 	"github.com/plentico/plenti/writers"
 
@@ -29,18 +29,20 @@ var siteCmd = &cobra.Command{
 	Long: heredoc.Doc(`
 	The project scaffolding follows this convention:
 	  - plenti.json = sitewide configuration.
-	  - assets/ = holds static files like images or videos.
 	  - content/ = json files that hold site content.
 	  - content/pages/ = regular site pages in json format.
-	  - content/pages/_blueprint.json = template for the structure of a typical page.
+	  - content/pages/_defaults.json = template for the starting content of a page.
+	  - content/pages/_schema.json = defines the field types for the CMS editor.
 	  - content/pages/about.json = an example page.
 	  - content/pages/contact.json = another example page.
 	  - layouts/ =  the html structure of the site.
 	  - layouts/content/ = node level structure that has a route and correspond to content.
 	  - layouts/components/ = smaller reusable structures that can be used within larger ones.
 	  - layouts/global/ = base level html wrappers.
+	  - media/ = holds user uploaded files like images or videos.
 	  - node_modules/ = frontend libraries managed by npm.
 	  - package.json = npm configuration file.
+	  - static/ = holds theme files like global.css or robots.txt.
 	`),
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
@@ -75,16 +77,16 @@ var siteCmd = &cobra.Command{
 		}
 		// Create base directory for site
 		if err := os.MkdirAll(projectDir, os.ModePerm); err != nil {
-			common.CheckErr(fmt.Errorf("Unable to create directory %s: %w", projectDir, err))
+			log.Fatal("Unable to create directory %s: %w", projectDir, err)
 		}
 
 		// Check for --theme flag.
 		if themeFlag != "" {
 			// Create empty base folders for the project
-			defaultDirs := []string{"assets", "content", "layouts"}
+			defaultDirs := []string{"content", "layouts", "media", "static"}
 			for _, dir := range defaultDirs {
 				if err := os.MkdirAll(projectDir+"/"+dir, os.ModePerm); err != nil {
-					common.CheckErr(fmt.Errorf("Unable to create directory %s: %w", projectDir+"/"+dir, err))
+					log.Fatal("Unable to create directory %s: %w", projectDir+"/"+dir, err)
 				}
 			}
 
@@ -102,6 +104,7 @@ var siteCmd = &cobra.Command{
 			repo := addTheme(themeDir, themeFlag, repoName)
 			commitHash := getCommitHash(repo)
 			setThemeConfig(projectDir, themeFlag, commitHash, repoName)
+			cleanThemeGit(themeDir)
 
 			// Enable the theme.
 			enableTheme(themeDir, projectDir, repoName)
@@ -113,7 +116,10 @@ var siteCmd = &cobra.Command{
 			// Copy over the route overrides from the theme.
 			siteConfig.Routes = themeSiteConfig.Routes
 			// Save the siteConfig for the project with the updated routes.
-			common.CheckErr(writers.SetSiteConfig(siteConfig, configPath))
+			err := writers.SetSiteConfig(siteConfig, configPath)
+			if err != nil {
+				log.Fatal("Could not write site config %w\n", err)
+			}
 
 			return
 
@@ -122,19 +128,19 @@ var siteCmd = &cobra.Command{
 		// Check for --bare flag.
 		bareFlag, err := cmd.Flags().GetBool("bare")
 		if err != nil {
-			common.CheckErr(fmt.Errorf("Unable to get 'bare' flag: %w", err))
+			log.Fatal("Unable to get 'bare' flag: %w", err)
 		}
 
 		// set to Defaults and overwrite if bareFlag is set
-		scaffolding, err := fs.Sub(defaultsLearnerFS, "defaults/starters/learner")
+		scaffolding, err := fs.Sub(defaults.LearnerFS, "starters/learner")
 		if err != nil {
-			common.CheckErr(fmt.Errorf("Unable to get learner defaults: %w", err))
+			log.Fatal("Unable to get learner defaults: %w", err)
 		}
 		// Choose which scaffolding to use for new site.
 		if bareFlag {
-			scaffolding, err = fs.Sub(defaultsBareFS, "defaults/starters/bare")
+			scaffolding, err = fs.Sub(defaults.BareFS, "starters/bare")
 			if err != nil {
-				common.CheckErr(fmt.Errorf("Unable to get bare defaults: %w", err))
+				log.Fatal("Unable to get bare defaults: %w", err)
 			}
 		}
 		// Loop through site defaults to create site scaffolding
@@ -144,25 +150,24 @@ var siteCmd = &cobra.Command{
 		addNodeModules(projectDir)
 
 		fmt.Printf(heredoc.Docf(`
-			Success: Created %q site.
 
-			We suggest that you begin by typing:
+			Success: Created %q ✅
 
-			  cd %s
-			  plenti serve
+			Get started with: cd %s && plenti serve
+
 		`, projectDir, projectDir))
 
 	},
 }
 
 func writeDefaultFile(filename string, projectDir string) {
-	defaultFile, err := defaultsBareFS.ReadFile("defaults/starters/bare/" + filename)
+	defaultFile, err := defaults.BareFS.ReadFile("starters/bare/" + filename)
 	if err != nil {
 		fmt.Printf("Can't read default file '%s': %s\n", filename, err)
 	}
 	// Create the current default file
 	if err := ioutil.WriteFile(projectDir+"/"+filename, defaultFile, os.ModePerm); err != nil {
-		common.CheckErr(fmt.Errorf("Unable to write file '%s': %w\n", filename, err))
+		log.Fatal("Unable to write file '%s': %w\n", filename, err)
 	}
 }
 
@@ -174,7 +179,7 @@ func writeScaffolding(defaults fs.FS, projectDir string) {
 		if d.IsDir() {
 			// Create the directories needed for the current file
 			if err := os.MkdirAll(projectDir+"/"+path, os.ModePerm); err != nil {
-				common.CheckErr(fmt.Errorf("Unable to create path(s) %s: %v", path, err))
+				log.Fatal("Unable to create path(s) %s: %v", path, err)
 			}
 			return nil
 		}
@@ -182,7 +187,7 @@ func writeScaffolding(defaults fs.FS, projectDir string) {
 		contentBytes, err := ioutil.ReadAll(content)
 		// Create the current default file
 		if err := ioutil.WriteFile(projectDir+"/"+path, contentBytes, 0755); err != nil {
-			common.CheckErr(fmt.Errorf("Unable to write file: %w", err))
+			log.Fatal("Unable to write file: %w", err)
 		}
 		return nil
 	})
@@ -190,9 +195,9 @@ func writeScaffolding(defaults fs.FS, projectDir string) {
 }
 
 func addNodeModules(projectDir string) {
-	nodeModules, err := fs.Sub(defaultsNodeModulesFS, "defaults")
+	nodeModules, err := fs.Sub(defaults.NodeModulesFS, ".")
 	if err != nil {
-		common.CheckErr(fmt.Errorf("Unable to get node_modules defaults: %w", err))
+		log.Fatal("Unable to get node_modules defaults: %w", err)
 	}
 	// Loop through node_modules npm pacakges to include in scaffolding
 	writeScaffolding(nodeModules, projectDir)

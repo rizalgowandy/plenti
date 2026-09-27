@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"io/fs"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 
-	"github.com/plentico/plenti/common"
-
 	"github.com/manifoldco/promptui"
+	"github.com/plentico/plenti/defaults"
 	"github.com/spf13/cobra"
 )
 
@@ -34,19 +34,19 @@ continue to work properly and you will have to manually apply any
 updates that are made to the core files (these are normally applied
 automatically).`,
 	Run: func(cmd *cobra.Command, args []string) {
-		ejected, err := fs.Sub(defaultsEjectedFS, "defaults")
+		coreDefaults, err := fs.Sub(defaults.CoreFS, ".")
 		if err != nil {
 			fmt.Printf("Unable to get ejected defaults: %s", err)
 		}
 		ejectableFiles := map[string][]byte{}
-		fs.WalkDir(ejected, ".", func(path string, d fs.DirEntry, err error) error {
+		fs.WalkDir(coreDefaults, ".", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() {
 				return nil
 			}
-			contentFile, _ := ejected.Open(path)
+			contentFile, _ := coreDefaults.Open(path)
 			contentBytes, _ := ioutil.ReadAll(contentFile)
 			ejectableFiles[path] = contentBytes
 			return nil
@@ -54,7 +54,10 @@ automatically).`,
 		if len(args) < 1 && EjectAll {
 			fmt.Println("All flag used, eject all core files.")
 			for filePath, content := range ejectableFiles {
-				common.CheckErr(ejectFile(filePath, content))
+				err := ejectFile(filePath, content)
+				if err != nil {
+					log.Fatal("Could not eject all core files %v\n", err)
+				}
 			}
 			return
 		}
@@ -79,7 +82,10 @@ automatically).`,
 				return
 			}
 			if confirmed == "Yes" {
-				common.CheckErr(ejectFile(result, ejectableFiles[result]))
+				err := ejectFile(result, ejectableFiles[result])
+				if err != nil {
+					log.Fatal("Can't eject file %v\n", err)
+				}
 			} else if confirmed == "No" {
 				fmt.Println("No file was ejected.")
 			}
@@ -98,7 +104,10 @@ automatically).`,
 					fmt.Printf("There is no ejectable file named %s. Run 'plenti eject' to see list of ejectable files.\n", arg)
 					return
 				}
-				common.CheckErr(ejectFile(arg, ejectableFiles[arg]))
+				err := ejectFile(arg, ejectableFiles[arg])
+				if err != nil {
+					log.Fatal("Can't eject files %v\n", err)
+				}
 			}
 		}
 	},
@@ -127,7 +136,7 @@ func ejectFile(filePath string, content []byte) error {
 		}
 		_, overwrite, err := overwritePrompt.Run()
 		if err != nil {
-			return fmt.Errorf("Prompt failed %w%s\n", err, common.Caller())
+			return fmt.Errorf("Prompt failed %w\n", err)
 
 		}
 		if overwrite == "No" {
@@ -135,11 +144,11 @@ func ejectFile(filePath string, content []byte) error {
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(filePath), os.ModePerm); err != nil {
-		return fmt.Errorf("Unable to create path(s) %s: %w%s\n", filepath.Dir(filePath), err, common.Caller())
+		return fmt.Errorf("Unable to create path(s) %s: %w\n", filepath.Dir(filePath), err)
 
 	}
 	if err := ioutil.WriteFile(filePath, content, os.ModePerm); err != nil {
-		return fmt.Errorf("Unable to write file: %w%s\n", err, common.Caller())
+		return fmt.Errorf("Unable to write file: %w\n", err)
 	}
 	fmt.Printf("Ejected %s\n", filePath)
 	return nil

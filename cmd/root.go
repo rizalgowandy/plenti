@@ -2,12 +2,11 @@
 package cmd
 
 import (
-	"embed"
 	"fmt"
 	"log"
 	"os"
 
-	"github.com/plentico/plenti/common"
+	"github.com/plentico/plenti/readers"
 
 	"github.com/spf13/cobra"
 )
@@ -15,18 +14,6 @@ import (
 var cfgFile string
 
 var versionFlag bool
-
-//go:embed all:defaults/ejected/*
-var defaultsEjectedFS embed.FS
-
-//go:embed all:defaults/node_modules/*
-var defaultsNodeModulesFS embed.FS
-
-//go:embed all:defaults/starters/bare/*
-var defaultsBareFS embed.FS
-
-//go:embed all:defaults/starters/learner/*
-var defaultsLearnerFS embed.FS
 
 // Version gets replaced by git tag referenced in -ldflags on build.
 var Version = "undefined"
@@ -47,7 +34,10 @@ Learn more at https://plenti.co`,
 		if versionFlag {
 			fmt.Println(Version)
 		} else {
-			common.CheckErr(cmd.Help())
+			err := cmd.Help()
+			if err != nil {
+				log.Fatal("Could not produce help text %w", err)
+			}
 		}
 	},
 }
@@ -71,7 +61,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.plenti.yaml)")
+	//rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.plenti.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -104,4 +94,5 @@ func initConfig() {
 			fmt.Println("Using config file:", viper.ConfigFileUsed())
 		}
 	*/
+	readers.CheckConfigFileFlag(ConfigFileFlag)
 }

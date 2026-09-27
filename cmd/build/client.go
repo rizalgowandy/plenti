@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/plentico/plenti/common"
 	"github.com/plentico/plenti/readers"
 	"github.com/spf13/afero"
 
@@ -24,55 +24,36 @@ import (
 var SSRctx *v8go.Context
 
 // Client builds the SPA.
-func Client(buildPath string, defaultsEjectedFS embed.FS) error {
+func Client(spaPath string, coreFS embed.FS, compilerFS embed.FS) error {
 
 	defer Benchmark(time.Now(), "Compiling client SPA with Svelte")
 
 	Log("\nCompiling client SPA with svelte")
 
-	stylePath := buildPath + "/spa/bundle.css"
-	if common.UseMemFS {
-		// clear styles as we append bytes.
-		common.Set(stylePath, "", &common.FData{})
-	}
-	allLayoutsPath := buildPath + "/spa/ejected/layouts.js"
+	stylePath := spaPath + "bundle.css"
+	allLayoutsPath := spaPath + "generated/layouts.js"
 	// Initialize string for layouts.js component list.
 	var allLayoutsStr string
 
 	// Set up counter for logging output.
 	compiledComponentCounter := 0
 
-	// Get svelte compiler code from node_modules.
-	compiler, err := getVirtualFileIfThemeBuild("node_modules/svelte/compiler.js")
+	// Get transformed svelte compiler code from embedded filesystem.
+	compiler, err := compilerFS.ReadFile("compiler/generated/compiler.js")
 	if err != nil {
 		return err
 	}
-	// Remove reference to 'self' that breaks v8go on line 19 of node_modules/svelte/compiler.js.
-	compilerStr := strings.Replace(string(compiler), "self.performance.now();", "'';", 1)
-	// Remove 'require' that breaks v8go on line 22647 of node_modules/svelte/compiler.js.
-	compilerStr = strings.Replace(compilerStr, "const Url$1 = (typeof URL !== 'undefined' ? URL : require('url').URL);", "", 1)
-	ctx, err := v8go.NewContext(nil)
-	if err != nil {
-		return fmt.Errorf("Could not create Isolate: %w%s\n", err, common.Caller())
-
-	}
+	compilerStr := string(compiler)
+	ctx := v8go.NewContext(nil)
 	_, err = ctx.RunScript(compilerStr, "compile_svelte")
 	if err != nil {
-		return fmt.Errorf("Could not add svelte compiler: %w%s\n", err, common.Caller())
+		return fmt.Errorf("Could not add svelte compiler: %w\n", err)
 
 	}
 
-	SSRctx, err = v8go.NewContext(nil)
-	if err != nil {
-		return fmt.Errorf("Could not create Isolate: %w%s\n", err, common.Caller())
-
-	}
+	SSRctx = v8go.NewContext(nil)
 	// Fix "ReferenceError: exports is not defined" errors on line 1319 (exports.current_component;).
 	if _, err := SSRctx.RunScript("var exports = {};", "create_ssr"); err != nil {
-		return err
-	}
-	// Fix "TypeError: Cannot read property 'noop' of undefined" from node_modules/svelte/store/index.js.
-	if _, err := SSRctx.RunScript("function noop(){}", "create_ssr"); err != nil {
 		return err
 	}
 
@@ -92,10 +73,8 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 			return err
 
 		}
-		// Fix "Cannot access 'on_destroy' before initialization" errors on line 1320 & line 1337 of node_modules/svelte/internal/index.js.
-		createSsrStr := strings.ReplaceAll(string(createSsrComponent), "function create_ssr_component(fn) {", "function create_ssr_component(fn) {var on_destroy= {};")
-		// Use empty noop() function created above instead of missing method.
-		createSsrStr = strings.ReplaceAll(createSsrStr, "internal.noop", "noop")
+		// Fix: TypeError: Cannot read properties of undefined (reading 'noop')
+		createSsrStr := strings.ReplaceAll(string(createSsrComponent), "internal.noop", "noop")
 		_, err = SSRctx.RunScript(createSsrStr, "create_ssr")
 		/*
 			// TODO: Can't check error because `ReferenceError: require is not defined` error on build so cannot quit ...
@@ -107,7 +86,7 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 	}
 
 	// Compile Svelte components from ejectable core
-	fs.WalkDir(defaultsEjectedFS, "defaults/ejected", func(path string, d fs.DirEntry, err error) error {
+	fs.WalkDir(coreFS, "core", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -117,8 +96,6 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 		}
 		// Initialize var to hold actual component file contents
 		var componentStr string
-		// Remove the root folder since that doesn't get written to fs
-		path = strings.TrimPrefix(path, "defaults/")
 		// Check if the path has been ejected to the filesystem.
 		_, err = os.Stat(path)
 		// Check if the path has been ejected to the virtual filesystem for a theme build.
@@ -129,14 +106,14 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 			// The file has been ejected to the filesystem.
 			component, err := getVirtualFileIfThemeBuild(path)
 			if err != nil {
-				return fmt.Errorf("can't read component file: %s %w%s\n", path, err, common.Caller())
+				return fmt.Errorf("can't read component file: %s %w\n", path, err)
 			}
 			componentStr = string(component)
 		} else if os.IsNotExist(err) {
 			// The file has not been ejected, use the embedded defaults.
-			nonEjectedFS, err := fs.Sub(defaultsEjectedFS, "defaults")
+			nonEjectedFS, err := fs.Sub(coreFS, ".")
 			if err != nil {
-				common.CheckErr(fmt.Errorf("Unable to get non ejected defaults: %w", err))
+				log.Fatal("Unable to get non ejected defaults: %w", err)
 			}
 			component, err := nonEjectedFS.Open(path)
 			if err != nil {
@@ -148,7 +125,7 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 			}
 			componentStr = string(componentBytes)
 		}
-		destPath := buildPath + "/spa/" + strings.TrimSuffix(path, ".svelte") + ".js"
+		destPath := spaPath + strings.TrimSuffix(path, ".svelte") + ".js"
 		err = (compileSvelte(ctx, SSRctx, path, componentStr, destPath, stylePath))
 		if err != nil {
 			fmt.Printf("Could not compile '%s' Svelte component: %s", path, err)
@@ -163,17 +140,17 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 			if layoutFileInfo.IsDir() {
 				return nil
 			}
-			err = copyNonSvelteFiles(layoutPath, buildPath)
+			err = copyNonSvelteFiles(layoutPath, spaPath)
 			if err != nil {
 				return err
 			}
-			compiledComponentCounter, allLayoutsStr, err = compileComponent(err, layoutPath, layoutFileInfo, buildPath, ctx, SSRctx, stylePath, allLayoutsStr, compiledComponentCounter)
+			compiledComponentCounter, allLayoutsStr, err = compileComponent(err, layoutPath, layoutFileInfo, spaPath, ctx, SSRctx, stylePath, allLayoutsStr, compiledComponentCounter)
 			if err != nil {
 				return err
 			}
 			return nil
 		}); err != nil {
-			return fmt.Errorf("Could not get layout from virtual theme build: %w%s\n", err, common.Caller())
+			return fmt.Errorf("\nCould not get layout from virtual theme build %w", err)
 		}
 	} else {
 		// A theme is NOT being used, so compile the components from the root project
@@ -181,70 +158,64 @@ func Client(buildPath string, defaultsEjectedFS embed.FS) error {
 			if layoutFileInfo.IsDir() {
 				return nil
 			}
-			err = copyNonSvelteFiles(layoutPath, buildPath)
+			err = copyNonSvelteFiles(layoutPath, spaPath)
 			if err != nil {
 				return err
 			}
-			compiledComponentCounter, allLayoutsStr, err = compileComponent(err, layoutPath, layoutFileInfo, buildPath, ctx, SSRctx, stylePath, allLayoutsStr, compiledComponentCounter)
+			compiledComponentCounter, allLayoutsStr, err = compileComponent(err, layoutPath, layoutFileInfo, spaPath, ctx, SSRctx, stylePath, allLayoutsStr, compiledComponentCounter)
 			if err != nil {
 				return err
 			}
 			return nil
 		}); err != nil {
-			return fmt.Errorf("Could not get layout: %w%s\n", err, common.Caller())
+			return fmt.Errorf("\nCould not get all layouts %w", err)
 		}
 	}
 
-	if common.UseMemFS {
-		b := []byte(allLayoutsStr)
-		common.Set(allLayoutsPath, "", &common.FData{B: b})
-		return nil
-
-	}
 	// Write layouts.js to filesystem.
 	err = ioutil.WriteFile(allLayoutsPath, []byte(allLayoutsStr), os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("Unable to write layouts.js file: %w%s\n", err, common.Caller())
+		return fmt.Errorf("\nUnable to write layouts.js file: %w\n", err)
 	}
 
 	Log("Number of components compiled: " + strconv.Itoa(compiledComponentCounter))
 	return nil
 }
 
-func copyNonSvelteFiles(layoutPath string, buildPath string) error {
+func copyNonSvelteFiles(layoutPath string, spaPath string) error {
 	if filepath.Ext(layoutPath) != ".svelte" {
 		from, err := os.Open(layoutPath)
 		if err != nil {
-			return fmt.Errorf("Could not open non-svelte layout %s for copying: %w%s\n", layoutPath, err, common.Caller())
+			return fmt.Errorf("Could not open non-svelte layout %s for copying: %w\n", layoutPath, err)
 		}
 		defer from.Close()
 
-		destPath := buildPath + "/spa/" + strings.TrimPrefix(layoutPath, "layouts/")
+		destPath := spaPath + layoutPath
 		// Create any sub directories need for filepath.
 		if err := os.MkdirAll(filepath.Dir(destPath), os.ModePerm); err != nil {
-			return fmt.Errorf("can't make folders for '%s': %w%s\n", destPath, err, common.Caller())
+			return fmt.Errorf("can't make folders for '%s': %w\n", destPath, err)
 		}
 
 		to, err := os.Create(destPath)
 		if err != nil {
-			return fmt.Errorf("Could not create non-svelte layout destination %s for copying: %w%s\n", destPath, err, common.Caller())
+			return fmt.Errorf("Could not create non-svelte layout destination %s for copying: %w\n", destPath, err)
 		}
 		defer to.Close()
 
 		_, err = io.Copy(to, from)
 		if err != nil {
-			return fmt.Errorf("Could not copy non-svelte layout from source %s to destination: %w%s\n", layoutPath, err, common.Caller())
+			return fmt.Errorf("Could not copy non-svelte layout from source %s to destination: %w\n", layoutPath, err)
 		}
 	}
 	return nil
 }
 
-func compileComponent(err error, layoutPath string, layoutFileInfo os.FileInfo, buildPath string, ctx *v8go.Context, SSRctx *v8go.Context, stylePath string, allLayoutsStr string, compiledComponentCounter int) (int, string, error) {
+func compileComponent(err error, layoutPath string, layoutFileInfo os.FileInfo, spaPath string, ctx *v8go.Context, SSRctx *v8go.Context, stylePath string, allLayoutsStr string, compiledComponentCounter int) (int, string, error) {
 	if err != nil {
 		return compiledComponentCounter, allLayoutsStr, fmt.Errorf("can't stat %s: %w", layoutPath, err)
 	}
 	// Create destination path.
-	destFile := buildPath + "/spa/" + strings.TrimPrefix(layoutPath, "layouts/")
+	destFile := spaPath + layoutPath
 	// If the file is in .svelte format, compile it to .js
 	if filepath.Ext(layoutPath) == ".svelte" {
 		// Replace .svelte file extension with .js.
@@ -252,19 +223,17 @@ func compileComponent(err error, layoutPath string, layoutFileInfo os.FileInfo, 
 		// Get component file contents
 		component, err := getVirtualFileIfThemeBuild(layoutPath)
 		if err != nil {
-			return compiledComponentCounter, allLayoutsStr, fmt.Errorf("can't read component file: %s %w%s\n", layoutPath, err, common.Caller())
+			return compiledComponentCounter, allLayoutsStr, fmt.Errorf("can't read component file: %s %w\n", layoutPath, err)
 		}
 		componentStr := string(component)
 		// Actually compile component
 		if err = compileSvelte(ctx, SSRctx, layoutPath, componentStr, destFile, stylePath); err != nil {
-			return compiledComponentCounter, allLayoutsStr, fmt.Errorf("%w%s\n", err, common.Caller())
+			return compiledComponentCounter, allLayoutsStr, fmt.Errorf("%w\n", err)
 		}
 		// Create entry for layouts.js.
 		layoutSignature := strings.ReplaceAll(strings.ReplaceAll((layoutPath), "/", "_"), ".", "_")
-		// Remove layouts directory.
-		destLayoutPath := strings.TrimPrefix(layoutPath, "layouts/")
 		// Compose entry for layouts.js file.
-		allLayoutsStr = allLayoutsStr + "export {default as " + layoutSignature + "} from '../" + destLayoutPath + "';\n"
+		allLayoutsStr = allLayoutsStr + "export {default as " + layoutSignature + "} from '../" + layoutPath + "';\n"
 		// Increment counter for each compiled component.
 		compiledComponentCounter++
 	}
@@ -277,12 +246,12 @@ func getVirtualFileIfThemeBuild(filename string) ([]byte, error) {
 	if ThemeFs != nil {
 		fileContents, err = afero.ReadFile(ThemeFs, filename)
 		if err != nil {
-			return []byte{}, fmt.Errorf("Can't read %s from virtual theme: %w%s\n", filename, err, common.Caller())
+			return []byte{}, fmt.Errorf("Can't read %s from virtual theme: %w\n", filename, err)
 		}
 	} else {
 		fileContents, err = ioutil.ReadFile(filename)
 		if err != nil {
-			return []byte{}, fmt.Errorf("Can't read %s from filesystem: %w%s\n", filename, err, common.Caller())
+			return []byte{}, fmt.Errorf("Can't read %s from filesystem: %w\n", filename, err)
 		}
 	}
 	return fileContents, nil

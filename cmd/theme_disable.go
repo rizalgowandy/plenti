@@ -3,8 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log"
 
-	"github.com/plentico/plenti/common"
 	"github.com/plentico/plenti/readers"
 	"github.com/plentico/plenti/writers"
 
@@ -16,7 +16,7 @@ var themeDisableCmd = &cobra.Command{
 	Use:   "disable [theme]",
 	Short: "Stop actively using a specific theme in your project",
 	Long: `Disabling a theme removes the "theme" entry in plenti.json. Your
-will no longer inherit assets, content, and layouts from this theme.
+will no longer inherit content, layouts, media, and static from this theme.
 `,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
@@ -49,7 +49,10 @@ will no longer inherit assets, content, and layouts from this theme.
 		}
 		siteConfig.Theme = ""
 		// Update the config file on the filesystem.
-		common.CheckErr(writers.SetSiteConfig(siteConfig, configPath))
+		err := writers.SetSiteConfig(siteConfig, configPath)
+		if err != nil {
+			log.Fatal("Could not update site config file %w", err)
+		}
 
 	},
 }

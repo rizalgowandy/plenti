@@ -3,10 +3,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
-
-	"github.com/plentico/plenti/common"
 
 	"github.com/spf13/cobra"
 )
@@ -35,7 +34,9 @@ There are no required fields when creating your new type.
 Any individual file within a type can contain variations in its field structure.
 Just make sure to account for this in the corresponding '/layouts/content/<your_type>.svelte' file.
 
-Optionally add a _blueprint.json file to define the default field structure for the type.
+Optionally add a _defaults.json file to define the default content for the type when creating a new instance.
+
+Optionally add a _schema.json file to define the input widgets used in the editor.
 `,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
@@ -54,10 +55,15 @@ Optionally add a _blueprint.json file to define the default field structure for 
 
 		// shoud we stop here on error from either?
 		if SingleTypeFlag {
-
-			common.CheckErr(singleTypeProcess(typeName))
+			err := createSingleType(typeName)
+			if err != nil {
+				log.Fatal("Can't create single type %w", err)
+			}
 		} else {
-			common.CheckErr(doTypeContentPath(typeName))
+			err := createMultiType(typeName)
+			if err != nil {
+				log.Fatal("Can't create new type %w", err)
+			}
 		}
 
 		if EndpointFlag {
@@ -70,54 +76,53 @@ Optionally add a _blueprint.json file to define the default field structure for 
 
 			fmt.Printf("Creating new Type layout: %s\n", typeLayoutPath)
 			if _, err := os.OpenFile(typeLayoutPath, os.O_RDONLY|os.O_CREATE, os.ModePerm); err != nil {
-				common.CheckErr(fmt.Errorf("Can't create layout for type \"%s\": %w", typeName, err))
+				log.Fatal("Can't create layout for type \"%s\": %w", typeName, err)
 			}
 		}
 
 	},
 }
 
-func doTypeContentPath(typeName string) error {
+func createMultiType(typeName string) error {
 	typeContentPath := fmt.Sprintf("content/%s", strings.Trim(typeName, " /"))
-	//  !os.IsNotExist is true, the path exists. os.IsExist(err) == nil for Stat if file exists
-	if _, err := os.Stat(typeContentPath); !os.IsNotExist(err) {
-		fmt.Printf("A Type content source with the same name located at \"%s/\" already exists\n", typeContentPath)
-		// an error?
-		return nil
 
+	if _, err := os.Stat(typeContentPath); !os.IsNotExist(err) {
+		// The path already exists
+		return fmt.Errorf("A Type content source with the same name located at \"%s/\" already exists\n", typeContentPath)
 	}
 
 	if _, err := os.Stat(typeContentPath + ".json"); !os.IsNotExist(err) {
 		// error or not?
-		fmt.Printf("A single file Type content source with the same name located at \"%s.json\" already exists\n", typeContentPath)
-		return nil
+		return fmt.Errorf("A single file Type content source with the same name located at \"%s.json\" already exists\n", typeContentPath)
 	}
 
 	fmt.Printf("Creating new Type content source: %s/\n", typeContentPath)
 	if err := os.MkdirAll(typeContentPath, os.ModePerm); err != nil {
-		return fmt.Errorf("Can't create type named \"%s\": %w%s\n", typeName, err, common.Caller())
+		return fmt.Errorf("Can't create type named \"%s\": %w\n", typeName, err)
 	}
-	err := createJSONFile(typeContentPath + "/_blueprint.json")
+	err := createJSONFile(typeContentPath + "/_defaults.json")
 	if err != nil {
-		return fmt.Errorf("Can't create _blueprint.json for type \"%s\": %w%s\n", typeName, err, common.Caller())
+		return fmt.Errorf("Can't create _defaults.json for type \"%s\": %w\n", typeName, err)
+	}
+	err = createJSONFile(typeContentPath + "/_schema.json")
+	if err != nil {
+		return fmt.Errorf("Can't create _schema.json for type \"%s\": %w\n", typeName, err)
 	}
 	return nil
 }
-func singleTypeProcess(typeName string) error {
-	singleTypePath := fmt.Sprintf("content/%s.json", typeName)
-	_, err := os.Stat(singleTypePath)
 
-	if err == nil {
-		errorMsg := fmt.Sprintf("A single type content source with the same name located at \"%s\" already exists\n", singleTypePath)
-		fmt.Printf(errorMsg)
-		return errors.New(errorMsg)
+func createSingleType(typeName string) error {
+	singleTypePath := fmt.Sprintf("content/%s.json", typeName)
+
+	if _, err := os.Stat(singleTypePath); !os.IsNotExist(err) {
+		return fmt.Errorf("A single type content source with the same name located at \"%s\" already exists\n", singleTypePath)
 	}
 
 	fmt.Printf("Creating new single type content source: %s\n", singleTypePath)
 
-	err = createJSONFile(singleTypePath)
+	err := createJSONFile(singleTypePath)
 	if err != nil {
-		return fmt.Errorf("Can't create single type content source for: \"%s\": %w%s\n", typeName, err, common.Caller())
+		return fmt.Errorf("Can't create single type content source for: \"%s\": %w\n", typeName, err)
 	}
 
 	return nil
@@ -126,12 +131,12 @@ func singleTypeProcess(typeName string) error {
 func createJSONFile(filePath string) error {
 	f, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("Can't create file: \"%s\": %w%s\n", filePath, err, common.Caller())
+		return fmt.Errorf("Can't create file: \"%s\": %w\n", filePath, err)
 	}
 
 	_, err = f.Write([]byte("{}"))
 	if err != nil {
-		return fmt.Errorf("Can't add empty curly brackets to file: \"%s\": %w%s\n", filePath, err, common.Caller())
+		return fmt.Errorf("Can't add empty curly brackets to file: \"%s\": %w\n", filePath, err)
 	}
 	// can be non-nil error
 	return f.Close()

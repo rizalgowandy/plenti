@@ -3,9 +3,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 
-	"github.com/plentico/plenti/common"
 	"github.com/plentico/plenti/readers"
 	"github.com/plentico/plenti/writers"
 
@@ -17,8 +17,8 @@ var themeEnableCmd = &cobra.Command{
 	Use:   "enable [theme]",
 	Short: "Use a specific theme as a starting point for your project",
 	Long: `Enabling a theme adds a "theme" entry to plenti.json. Once
-this has been added, builds will inherit assets, content,
-and layouts from the theme you enabled.
+this has been added, builds will inherit media, content, layouts, and
+static files from the theme you enabled.
 `,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
@@ -52,7 +52,10 @@ func enableTheme(themeLocation string, configLocation string, repoName string) {
 	if _, err := os.Stat(themeLocation); !os.IsNotExist(err) {
 		siteConfig.Theme = repoName
 		// Update the config file on the filesystem.
-		common.CheckErr(writers.SetSiteConfig(siteConfig, configPath))
+		err := writers.SetSiteConfig(siteConfig, configPath)
+		if err != nil {
+			log.Fatal("Could not update the config file %w", err)
+		}
 	} else {
 		fmt.Printf("Could not locate '%v' theme: %v\n", repoName, err)
 	}

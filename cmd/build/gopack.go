@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/plentico/plenti/common"
 	"github.com/plentico/plenti/readers"
 )
 
@@ -39,24 +38,13 @@ var (
 	reStaticExportGoPk = regexp.MustCompile(`export(\s)(.*from(.*);|((.*\n){0,}?)\}(\s)from(.*);)`)
 	// Find the path specifically (part between single or double quotes).
 	rePath = regexp.MustCompile(`(?:'|").*(?:'|")`)
-	// Retrieve minifier and load JS
-	m = loadJSMinifier()
 )
-
-// Create global var since cmd.minifyFlag is a circular dependency.
-var minifyFlag bool
-
-// CheckMinifyFlag sets global var if --minify flag is passed.
-func CheckMinifyFlag(flag bool) {
-	// If --minify flag is passed by user, this will be set to true.
-	minifyFlag = flag
-}
 
 // Initialize globally to keep track during recursion.
 var alreadyConvertedFiles []string
 
 // Gopack ensures ESM support for NPM dependencies.
-func Gopack(buildPath string) {
+func Gopack(buildPath, spaPath, entrypoint string) error {
 
 	defer Benchmark(time.Now(), "Running Gopack")
 
@@ -66,19 +54,22 @@ func Gopack(buildPath string) {
 	alreadyConvertedFiles = []string{}
 
 	// Start at the entry point for the app
-	runPack(buildPath, buildPath+"/spa/ejected/main.js")
+	err := runPack(buildPath, spaPath, entrypoint)
+	if err != nil {
+		return err
+	}
 
+	return nil
 }
 
-func runPack(buildPath, convertPath string) error {
-
+func runPack(buildPath, spaPath, convertPath string) error {
 	// Destination path for dependencies
-	gopackDir := buildPath + "/spa/web_modules"
+	gopackDir := spaPath + "web_modules"
 
 	// Get the actual contents of the file we want to convert
 	contentBytes, err := ioutil.ReadFile(convertPath)
 	if err != nil {
-		return fmt.Errorf("Could not read file %s to convert to esm: %w%s\n", convertPath, err, common.Caller())
+		return fmt.Errorf("\nCould not read file %s to convert to esm\n%w", convertPath, err)
 	}
 
 	// Created byte array of all dynamic imports in the current file.
@@ -111,6 +102,10 @@ func runPack(buildPath, convertPath string) error {
 		// Initialize the full path of the import.
 		var fullPathStr string
 
+		if pathStr == "" {
+			break
+		}
+
 		// Convert .svelte file extensions to .js so the browser can read them.
 		if filepath.Ext(pathStr) == ".svelte" {
 			// Declare found since path should be relative to the component it's referencing.
@@ -118,7 +113,7 @@ func runPack(buildPath, convertPath string) error {
 		}
 
 		// If relative import (catches both previously .svelte paths and those already in .js format)
-		if pathStr[:1] == "." {
+		if len(pathStr) > 0 && pathStr[:1] == "." {
 			// Make relative pathStr a full path that we can find on the filesystem.
 			fullPathStr = path.Clean(path.Dir(convertPath) + "/" + pathStr)
 
@@ -157,7 +152,7 @@ func runPack(buildPath, convertPath string) error {
 				foundPath = pathStr
 			} else if strings.HasPrefix(convertPath, gopackDir) {
 				// The relative import is coming from a web_module itself
-				// Change out of public/spa/web_modules and go into node_modules
+				// Change out of public/{spaPath}/web_modules and go into node_modules
 				modulePath := "node_modules" + strings.TrimPrefix(fullPathStr, gopackDir)
 				// Get the module from npm
 				err = copyFile(modulePath, fullPathStr)
@@ -174,8 +169,8 @@ func runPack(buildPath, convertPath string) error {
 
 		// Make sure the import/export path doesn't start with a dot (.) or double dot (..)
 		// and make sure that the path doesn't have a file extension.
-		if pathStr[:1] != "." && filepath.Ext(pathStr) == "" {
-			// Copy the npm file from /node_modules to /spa/web_modules
+		if len(pathStr) > 0 && pathStr[:1] != "." && filepath.Ext(pathStr) == "" {
+			// Copy the npm file from /node_modules to /{spaPath}/web_modules
 			fullPathStr, err = copyNpmModule(pathStr, gopackDir)
 			if err != nil {
 				fmt.Printf("Can't copy npm module: %s", err)
@@ -194,7 +189,10 @@ func runPack(buildPath, convertPath string) error {
 			// Add the current file to list of already converted files.
 			alreadyConvertedFiles = append(alreadyConvertedFiles, fullPathStr)
 			// Use fullPathStr recursively to find its imports.
-			runPack(buildPath, fullPathStr)
+			err = runPack(buildPath, spaPath, fullPathStr)
+			if err != nil {
+				return fmt.Errorf("\nCan't runPack on %s %w", fullPathStr, err)
+			}
 		}
 
 		if foundPath != "" {
@@ -208,16 +206,13 @@ func runPack(buildPath, convertPath string) error {
 			contentBytes = bytes.ReplaceAll(contentBytes, staticStatement,
 				rePath.ReplaceAll(staticStatement, rePath.ReplaceAll(pathBytes, replacePathBytes)))
 		} else {
-			fmt.Printf("Import path '%s' not resolvable from file '%s'\n", pathStr, convertPath)
+			return fmt.Errorf("\nImport path '%s' not resolvable from file '%s'\n", pathStr, convertPath)
 		}
-	}
-	if minifyFlag {
-		contentBytes = minifyJS(m, contentBytes)
 	}
 	// Overwrite the old file with the new content that contains the updated import path.
 	err = ioutil.WriteFile(convertPath, contentBytes, 0644)
 	if err != nil {
-		return fmt.Errorf("Could not overwite %s with new import: %w%s\n", convertPath, err, common.Caller())
+		return fmt.Errorf("Could not overwite %s with new import: %w\n", convertPath, err)
 	}
 	return nil
 
